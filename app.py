@@ -12,6 +12,7 @@ st.write("이미지를 업로드하면 thresholding과 morphology로 물체의 �
 
 # ---------------- Sidebar ----------------
 st.sidebar.header("Parameters")
+smooth = st.sidebar.slider("Distance smoothing (sigma)", 0.0, 8.0, 3.0, step=0.5)
 ksize = st.sidebar.slider("Median filter size (odd)", 3, 15, 5, step=2)
 sat_th = st.sidebar.slider("Saturation threshold", 5, 100, 35)
 val_th = st.sidebar.slider("Darkness threshold (V)", 10, 250, 80)
@@ -65,9 +66,10 @@ centers = []
 keep = np.array([], dtype=int)
 sizes = np.array([])
 
+
 if method.startswith("Distance"):
     dist = nd.distance_transform_edt(mask_c)
-    dist_s = nd.gaussian_filter(dist, 1)
+    dist_s = nd.gaussian_filter(dist, smooth)
     cand = (dist_s == nd.maximum_filter(dist_s, size=5)) & (dist_s > min_dist)
     ys, xs = np.nonzero(cand)
     order = np.argsort(-dist_s[ys, xs])
