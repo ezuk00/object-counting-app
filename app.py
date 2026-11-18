@@ -1,216 +1,127 @@
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+import scipy.signal as signal
 import scipy.ndimage as nd
 import streamlit as st
 from PIL import Image
 
-from skimage.feature import peak_local_max
-from skimage.segmentation import watershed
-
 st.set_page_config(page_title="Object Counting", layout="wide")
 st.title("Object Counting")
-st.write(
-    "이미지를 업로드하면 thresholding, morphology, "
-    "distance transform 및 watershed로 물체의 수를 세어줍니다."
-)
+st.write("이미지를 업로드하면 thresholding과 morphology로 물체의 수를 세어줍니다.")
 
 # ---------------- Sidebar ----------------
 st.sidebar.header("Parameters")
-
-ksize = st.sidebar.slider(
-    "Median filter size (odd)", 3, 15, 5, step=2
+ksize = st.sidebar.slider("Median filter size (odd)", 3, 15, 5, step=2)
+sat_th = st.sidebar.slider("Saturation threshold", 5, 100, 35)
+val_th = st.sidebar.slider("Darkness threshold (V)", 10, 250, 80)
+hole_max = st.sidebar.slider("Max hole size to fill (px)", 0, 3000, 20)
+open_k = st.sidebar.slider("Opening size", 1, 15, 3, step=2)
+erode_n = st.sidebar.slider("Erosion iterations", 0, 15, 3)
+method = st.sidebar.radio(
+    "Counting method",
+    ["Distance transform (touching objects)", "Connected components"],
 )
+min_dist = st.sidebar.slider("Min distance value (px)", 1, 30, 4)
+sup = st.sidebar.slider("Suppression factor", 0.3, 2.0, 0.8, step=0.1)
+min_area = st.sidebar.slider("Min object size (pixels, connected comp.)", 0, 2000, 100)
 
-sat_th = st.sidebar.slider(
-    "Saturation threshold", 5, 100, 25
-)
-
-val_th = st.sidebar.slider(
-    "Darkness threshold (V)", 100, 255, 235
-)
-
-open_k = st.sidebar.slider(
-    "Opening size", 1, 9, 3, step=2
-)
-
-min_dist = st.sidebar.slider(
-    "Minimum distance between objects", 3, 40, 15
-)
-
-min_area = st.sidebar.slider(
-    "Minimum object size (pixels)", 10, 3000, 100
-)
-
-# ---------------- Upload ----------------
-uploaded = st.file_uploader(
-    "이미지 파일 선택",
-    type=["jpg", "jpeg", "png"]
-)
-
+uploaded = st.file_uploader("이미지 파일 선택", type=["jpg", "jpeg", "png"])
 if uploaded is None:
     st.info("이미지를 업로드해주세요.")
     st.stop()
 
-# ---------------- 1. Load image ----------------
+# ---------------- 1. load ----------------
 rgb = Image.open(uploaded).convert("RGB")
-
-if rgb.width > 1200:
-    rgb = rgb.resize(
-        (1200, int(rgb.height * 1200 / rgb.width))
-    )
-
-rgb_array = np.array(rgb)
-
-gray = np.array(rgb.convert("L"))
-
+if rgb.width > 1000:
+    rgb = rgb.resize((1000, int(rgb.height * 1000 / rgb.width)))
+f = np.array(rgb.convert("L"))
 hsv = np.array(rgb.convert("HSV"))
-
 S = hsv[..., 1].astype(int)
 V = hsv[..., 2].astype(int)
 
-# ---------------- 2. Denoising ----------------
-denoised = nd.median_filter(gray, size=ksize)
+# ---------------- 2. denoise ----------------
+f_denoised = signal.medfilt2d(f, ksize)
+bg = int(np.percentile(f_denoised, 95))
 
-# ---------------- 3. Thresholding ----------------
-# Detect colored and dark objects on a bright background
-
+# ---------------- 3. mask ----------------
 mask = (S > sat_th) | (V < val_th)
+mask = nd.binary_opening(mask, structure=np.ones((open_k, open_k)))
 
-# Remove small noise
-mask = nd.binary_opening(
-    mask,
-    structure=np.ones((open_k, open_k))
-)
+# fill only SMALL holes (inside objects), not gaps between objects
+holes = nd.binary_fill_holes(mask) & ~mask
+hl, hn = nd.label(holes)
+hs = np.bincount(hl.ravel())
+small = np.isin(hl, np.where(hs < hole_max)[0]) & (hl > 0)
+mask = mask | small
 
-# Connect small gaps
-mask = nd.binary_closing(
-    mask,
-    structure=np.ones((3, 3))
-)
+# erosion: separate touching objects
+mask_c = mask.copy()
+if erode_n > 0:
+    mask_c = nd.binary_erosion(mask, structure=np.ones((3, 3)), iterations=erode_n)
 
-# Fill holes inside objects
-mask = nd.binary_fill_holes(mask)
-
-# ---------------- 4. Distance Transform ----------------
-distance = nd.distance_transform_edt(mask)
-
-# Smooth distance map
-distance_smooth = nd.gaussian_filter(distance, sigma=1)
-
-# ---------------- 5. Find object centers ----------------
-coordinates = peak_local_max(
-    distance_smooth,
-    min_distance=min_dist,
-    labels=mask.astype(np.uint8),
-    exclude_border=False
-)
-
-# Create markers
-markers = np.zeros(mask.shape, dtype=np.int32)
-
-for i, (y, x) in enumerate(coordinates, start=1):
-    markers[y, x] = i
-
-# ---------------- 6. Watershed Segmentation ----------------
-if len(coordinates) > 0:
-
-    labels = watershed(
-        -distance_smooth,
-        markers,
-        mask=mask
-    )
-
-else:
-    labels, _ = nd.label(mask)
-
-# ---------------- 7. Filter small objects ----------------
-sizes = np.bincount(labels.ravel())
-
-valid_labels = np.where(sizes >= min_area)[0]
-
-valid_labels = valid_labels[valid_labels != 0]
-
-final_mask = np.isin(labels, valid_labels)
-
-count = len(valid_labels)
-
-# Calculate centers
+# ---------------- 4. counting ----------------
 centers = []
+keep = np.array([], dtype=int)
+sizes = np.array([])
 
-for label_id in valid_labels:
-    center = nd.center_of_mass(
-        final_mask,
-        labels,
-        label_id
-    )
-    centers.append(center)
+if method.startswith("Distance"):
+    dist = nd.distance_transform_edt(mask_c)
+    dist_s = nd.gaussian_filter(dist, 1)
+    cand = (dist_s == nd.maximum_filter(dist_s, size=5)) & (dist_s > min_dist)
+    ys, xs = np.nonzero(cand)
+    order = np.argsort(-dist_s[ys, xs])
+    accepted = []
+    for i in order:
+        y, x = ys[i], xs[i]
+        ok = True
+        for (ay, ax, ar) in accepted:
+            if (y - ay) ** 2 + (x - ax) ** 2 < (sup * ar) ** 2:
+                ok = False
+                break
+        if ok:
+            accepted.append((y, x, dist_s[y, x]))
+    centers = [(a[0], a[1]) for a in accepted]
+    count = len(centers)
+else:
+    labels, nums = nd.label(mask_c)
+    sizes = np.bincount(labels.ravel())[1:]
+    keep = np.where(sizes >= min_area)[0] + 1
+    count = len(keep)
+    if count > 0:
+        labels_f = np.where(np.isin(labels, keep), labels, 0)
+        centers = nd.center_of_mass(mask_c, labels_f, keep)
 
-# ---------------- 8. Display ----------------
+
+# ---------------- display ----------------
 def show(img, title, cmap="gray", points=None):
-
-    fig, ax = plt.subplots(figsize=(6, 5))
-
+    fig, ax = plt.subplots()
     ax.imshow(img, cmap=cmap)
-
     if points is not None and len(points) > 0:
         py, px = zip(*points)
-
-        ax.scatter(
-            px, py,
-            c="red",
-            s=15,
-            marker="o"
-        )
-
+        ax.scatter(px, py, c="red", s=12)
     ax.set_title(title)
     ax.axis("off")
-
     st.pyplot(fig)
     plt.close(fig)
 
 
-# ---------------- Result ----------------
 st.metric("Object count", count)
-
-st.caption(
-    f"Detected {count} individual objects using Watershed."
-)
+st.caption(f"background level: {bg}")
 
 c1, c2 = st.columns(2)
-
 with c1:
-    show(gray, "Input (grayscale)")
-
+    show(f, "Input (grayscale)")
 with c2:
-    show(denoised, "Denoised (median filter)")
+    show(f_denoised, "Denoised (median filter)")
 
 c3, c4 = st.columns(2)
-
 with c3:
-    show(mask, "Binary mask")
-
+    show(mask_c, "Binary mask (after erosion)")
 with c4:
-    show(
-        final_mask,
-        f"Detected objects: {count}",
-        points=centers
-    )
+    show(f, f"Detected objects: {count}", points=centers)
 
-# ---------------- 9. Object information ----------------
-if count > 0:
-
+if method.startswith("Connected") and count > 0:
     st.subheader("Pixel count per object")
-
-    object_sizes = []
-
-    for label_id in valid_labels:
-        object_sizes.append({
-            "Object ID": int(label_id),
-            "Pixel area": int(sizes[label_id])
-        })
-
-    df = pd.DataFrame(object_sizes)
-
+    df = pd.DataFrame({"label": keep, "pixels": sizes[keep - 1]})
     st.dataframe(df, use_container_width=True)
