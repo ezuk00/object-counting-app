@@ -27,6 +27,7 @@ erode_n = st.sidebar.slider("Erosion iterations", 0, 15, 2)
 min_area = st.sidebar.slider("Min object area (px, after erosion)", 0, 3000, 40)
 mode = st.sidebar.radio("Counting", ["Connected components", "Connected + area split"])
 split_k = st.sidebar.slider("Typical object area multiplier", 0.5, 2.0, 1.0, step=0.1)
+skip_border = st.sidebar.checkbox("Ignore objects touching image border", True)
 
 uploaded = st.file_uploader("이미지 파일 선택", type=["jpg", "jpeg", "png"])
 if uploaded is None:
@@ -89,6 +90,10 @@ if erode_n > 0:
 labels_e, n = nd.label(mask_e)
 areas = np.bincount(labels_e.ravel(), minlength=n + 1)[1:]
 keep = np.where(areas >= min_area)[0] + 1
+if skip_border:
+    border = np.unique(np.concatenate(
+        [labels_e[0, :], labels_e[-1, :], labels_e[:, 0], labels_e[:, -1]]))
+    keep = np.array([k for k in keep if k not in border], dtype=int)
 if len(keep) == 0:
     st.warning("검출된 object가 없습니다. 파라미터를 조절해보세요.")
     st.stop()
