@@ -24,26 +24,24 @@ if uploaded is None:
     st.info("이미지를 업로드해주세요.")
     st.stop()
 
-# 1. grayscale
-I = Image.open(uploaded).convert("L")
-if I.width > 1000:
-    I = I.resize((1000, int(I.height * 1000 / I.width)))
-f = np.array(I)
+# 1. load (color)
+rgb = Image.open(uploaded).convert("RGB")
+if rgb.width > 1000:
+    rgb = rgb.resize((1000, int(rgb.height * 1000 / rgb.width)))
+f = np.array(rgb.convert("L"))
+hsv = np.array(rgb.convert("HSV"))
+S, V = hsv[..., 1].astype(int), hsv[..., 2].astype(int)
 
 # 2. noise 제거
 f_denoised = signal.medfilt2d(f, ksize)
 
-# 3. thresholding
-if dark_obj == "Darker than background":
-    bg = int(np.percentile(f_denoised, 95))   # 가장 밝은 영역 = 배경
-    mask = (bg - f_denoised.astype(int)) > th_val
-else:
-    bg = int(np.percentile(f_denoised, 5))    # 가장 어두운 영역 = 배경
-    mask = (f_denoised.astype(int) - bg) > th_val
-
+# 3. thresholding: өнгөлөг эсвэл харанхуй бол object
+sat_th = st.sidebar.slider("Saturation threshold", 5, 100, 35)
+val_th = st.sidebar.slider("Darkness threshold (V)", 100, 250, 200)
+bg = int(np.percentile(f_denoised, 95))
+mask = (S > sat_th) | (V < val_th)
 mask = nd.binary_fill_holes(mask)
 mask = nd.binary_opening(mask, structure=np.ones((3, 3)))
-mask = nd.binary_closing(mask, structure=np.ones((3, 3)))
 
 # 4. counting
 if method.startswith("Distance"):
